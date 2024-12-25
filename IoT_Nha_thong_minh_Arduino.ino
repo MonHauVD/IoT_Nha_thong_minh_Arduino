@@ -61,13 +61,17 @@ Button C
 #define BLYNK_PRINT Serial
 #include <BlynkSimpleEsp32.h>
 
-#define IR_RECEIVE_PIN 15
+#define IR_RECEIVE_PIN 34
 #define SEND_PWM_BY_TIMER
+#ifdef IR_TIMER_USE_ESP32
+hw_timer_t *timer;
+void IRTimer(); // defined in IRremote.cpp
+#endif
 
 #include <IRremote.hpp>
 
 #include <Wire.h>
-#include <Adafruit_GFX.h> 
+#include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <MFRC522.h>
 #include <PlayNote.h>
@@ -75,12 +79,19 @@ Button C
 #include <ESP32Servo.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <HTTPClient.h>
 
-// const char* ssid = "Dung";
-// const char* pass = "khongcomatkhau!";
+const char* ssid = "Dung";
+const char* pass = "khongcomatkhau!";
 
-const char* ssid = "Viet Dung";
-const char* pass = "MonHauVD121";
+// const char* ssid = "Viet Dung";
+// const char* pass = "MonHauVD121";
+
+// const char* server_name = "http://192.168.0.102:8080/process";
+const char* server_name = "https://host-esp32-http-post.onrender.com/process";
+
+unsigned long lastHttpRequestTime = 0;
+const unsigned long httpInterval = 1000;
 
 // Định nghĩa pin kết nối
 #define SS_PIN 5
@@ -93,7 +104,8 @@ const char* pass = "MonHauVD121";
 #define DieuHoa_PIN 14
 #define BUTTON_Cua_PIN 33
 #define BUTTON_ThemNg_PIN 32
-#define BUTTON_Den_PIN  25
+#define BUTTON_Den_PIN 25
+// #define READ_IR_ANALOG_FROM_OTHER_ESP32 15
 
 // OLED
 #define SCREEN_WIDTH 128
@@ -113,12 +125,12 @@ PlayNote playNote;
 DHTesp dhtSensor;
 
 // Biến lưu trạng thái hệ thống
-String savedUIDs[] = {" 04 43 0E C5 20 02 89", " 13 29 B2 E2", " 04 63 F8 BA 20 02 89", " 04 13 CC B7 20 02 89", "", "", "", "", "", ""}; // UID thẻ đã lưu
-String usernames[] = {"Viet Dung", "Van Kien","Hai Long", "The Anh", "", "", "", "", "", ""};
+String savedUIDs[] = { " 04 43 0E C5 20 02 89", " 13 29 B2 E2", " 04 63 F8 BA 20 02 89", " 04 13 CC B7 20 02 89", "", "", "", "", "", "" };  // UID thẻ đã lưu
+String usernames[] = { "Viet Dung", "Van Kien", "Hai Long", "The Anh", "", "", "", "", "", "" };
 int currentPosServo = ViTriDongCua;
-int savedUsers = 4; // số lượng người dùng đã lưu
-bool addUserMode = false; // chế độ thêm người dùng
-bool hasPeopleMode = false; // chế độ con người dùng trong phong
+int savedUsers = 4;          // số lượng người dùng đã lưu
+bool addUserMode = false;    // chế độ thêm người dùng
+bool hasPeopleMode = false;  // chế độ con người dùng trong phong
 bool isDoorClosed = true;
 bool isTurnOffLight = false;
 bool isTurnOffDieuHoa = false;
@@ -131,20 +143,15 @@ const unsigned long displayDuration = 3000;
 
 //Blynk
 int prevV4Value = LOW;
-BLYNK_WRITE(V4)
-{
+BLYNK_WRITE(V4) {
   int p = param.asInt();
-  if (p != prevV4Value)
-  {
+  if (p != prevV4Value) {
     prevV4Value = p;
-    if(isTurnOffLight)
-    {
+    if (isTurnOffLight) {
       isTurnOffLight = false;
       displayMessage("Bat den...");
       buttonBatDenSound();
-    }
-    else
-    {
+    } else {
       isTurnOffLight = true;
       displayMessage("Tat den...");
       buttonTatDenSound();
@@ -153,20 +160,15 @@ BLYNK_WRITE(V4)
 }
 
 int prevV5Value = LOW;
-BLYNK_WRITE(V5)
-{
+BLYNK_WRITE(V5) {
   int p = param.asInt();
-  if (p != prevV5Value)
-  {
+  if (p != prevV5Value) {
     prevV5Value = p;
-    if(isTurnOffDieuHoa)
-    {
+    if (isTurnOffDieuHoa) {
       isTurnOffDieuHoa = false;
       displayMessage("Bat dieu hoa...");
       buttonBatDieuHoaSound();
-    }
-    else
-    {
+    } else {
       isTurnOffDieuHoa = true;
       displayMessage("Tat dieu hoa...");
       buttonTatDieuHoaSound();
@@ -174,33 +176,62 @@ BLYNK_WRITE(V5)
   }
 }
 
-BlynkTimer blynkTimer; 
+int pin_control_den = 0;
+int prev_pin_control_den = 0;
+void setPinDenAutoFromWeb() {
+  if (pin_control_den != prev_pin_control_den) {
+    prev_pin_control_den = pin_control_den;
+    if (isTurnOffLight) {
+      isTurnOffLight = false;
+      displayMessage("Bat den...");
+      buttonBatDenSound();
+    } else {
+      isTurnOffLight = true;
+      displayMessage("Tat den...");
+      buttonTatDenSound();
+    }
+  }
+}
+int pin_control_dieuhoa = 0;
+int prev_pin_control_dieuhoa = 0;
+void setPinDieuHoaAutoFromWeb() {
+  if (pin_control_dieuhoa != prev_pin_control_dieuhoa) {
+    prev_pin_control_dieuhoa = pin_control_dieuhoa;
+    if (isTurnOffDieuHoa) {
+      isTurnOffDieuHoa = false;
+      displayMessage("Bat dieu hoa...");
+      buttonBatDieuHoaSound();
+    } else {
+      isTurnOffDieuHoa = true;
+      displayMessage("Tat dieu hoa...");
+      buttonTatDieuHoaSound();
+    }
+  }
+}
+
+BlynkTimer blynkTimer;
 
 int nhietDoGuiDi = 25;
 int doAmGuiDi = 65;
-void myTimer() 
-{
+void myTimer() {
   // displayMessage("Nhiet do: " + String(nhietDoGuiDi, 1) + "'C\n" + "Do am: " + String(doAmGuiDi, 1) + "%");
-  Blynk.virtualWrite(V2, nhietDoGuiDi);  
-  Blynk.virtualWrite(V3, doAmGuiDi);  
-  if(hasPeopleMode)
-  {
+  Blynk.virtualWrite(V2, nhietDoGuiDi);
+  Blynk.virtualWrite(V3, doAmGuiDi);
+  if (hasPeopleMode) {
     Blynk.virtualWrite(V0, "Có người");
-  }
-  else
-  {
+  } else {
     Blynk.virtualWrite(V0, "Không có người");
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  SPI.begin(); // khởi động SPI bus
-  mfrc522.PCD_Init(); // khởi động RFID
+  SPI.begin();         // khởi động SPI bus
+  mfrc522.PCD_Init();  // khởi động RFID
   mfrc522.PCD_DumpVersionToSerial();
 
-  
-  
+
+
   playNote.setBuzzerPin(BUZZER_PIN);
   pinMode(LDR_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
@@ -212,9 +243,10 @@ void setup() {
   dhtSensor.setup(DHT11_PIN, DHTesp::DHT11);
 
   // Khởi động màn hình OLED
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
-    for(;;);
+    for (;;)
+      ;
   }
   display.clearDisplay();
   display.setTextSize(1);
@@ -222,7 +254,7 @@ void setup() {
   display.display();
 
   myServo.attach(SERVO_PIN);
-  myServo.write(ViTriDongCua); // ban đầu servo ở vị trí đóng cửa
+  myServo.write(ViTriDongCua);  // ban đầu servo ở vị trí đóng cửa
   delay(1000);
   pinMode(SERVO_PIN, INPUT);
 
@@ -245,7 +277,7 @@ void setup() {
   Serial.println("Connected to WiFi network with IP Address: " + String(WiFi.localIP()));
   displayMessage("Connected to WiFi network with IP Address: " + String(WiFi.localIP()));
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
-  blynkTimer.setInterval(1000L, myTimer); 
+  blynkTimer.setInterval(1000L, myTimer);
   // Khởi động hoàn tất
   Serial.println("Hệ thống sẵn sàng.");
   displayMessage("He thong san sang.");
@@ -254,14 +286,13 @@ void setup() {
 void loop() {
   Blynk.run();
   blynkTimer.run();
-  if(!addUserMode)
-  {
-    if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) 
-    {
+  if (!addUserMode) {
+    // mfrc522.PCD_Init();
+    if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
       String cardUID = getCardUID();
       Serial.printf("Card UID: |%s|\n", cardUID);
       //Serial.println(cardUID);
-      
+
       // Kiểm tra thẻ có trong hệ thống không
       int userIndex = checkUser(cardUID);
       if (userIndex != -1) {
@@ -271,27 +302,21 @@ void loop() {
         // Sai UID
         handleFailure();
       }
-      
-      mfrc522.PICC_HaltA(); // Ngắt giao tiếp với thẻ
+
+      mfrc522.PICC_HaltA();  // Ngắt giao tiếp với thẻ
+      // IrReceiver.restartTimer();
     }
   }
- 
-
-  dieuKhienDen();
-  dieuKhienDieuHoa();
 
 
   // Kiểm tra nút A để khóa cửa
   if (digitalRead(BUTTON_Cua_PIN) == LOW) {
-    if(isDoorClosed)
-    {
+    if (isDoorClosed) {
       isDoorClosed = false;
       displayMessage("Dang mo cua...");
       buttonCuaMoSound();
       openDoor();
-    }
-    else
-    {
+    } else {
       isDoorClosed = true;
       displayMessage("Dang dong cua...");
       buttonCuaDongSound();
@@ -302,12 +327,9 @@ void loop() {
   // Kiểm tra nút B để vào chế độ thêm người dùng mới
   if (digitalRead(BUTTON_ThemNg_PIN) == LOW) {
     buttonThemNgSound();
-    if(addUserMode)
-    {
+    if (addUserMode) {
       addUserMode = false;
-    }
-    else
-    {
+    } else {
       addUserMode = true;
     }
     pressedButtonThemNguoi = false;
@@ -315,19 +337,18 @@ void loop() {
   }
 
   if (digitalRead(BUTTON_Den_PIN) == LOW) {
-    if(isTurnOffLight)
-    {
+    if (isTurnOffLight) {
       isTurnOffLight = false;
       displayMessage("Bat den...");
       buttonBatDenSound();
-    }
-    else
-    {
+    } else {
       isTurnOffLight = true;
       displayMessage("Tat den...");
       buttonTatDenSound();
     }
   }
+
+  // dieuKhienDen();
 
   if (IrReceiver.decode()) {
 
@@ -349,73 +370,124 @@ void loop() {
         /*
          * Finally, check the received data and perform actions according to the received command
          */
-         if (IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT) {
-        } 
-        else {
-          if (IrReceiver.decodedIRData.command == 0x45) {
-              Serial.println("On/Off");
-              if(isTurnOffLight)
-              {
-                isTurnOffLight = false;
-                displayMessage("Bat den...");
-                buttonBatDenSound();
-              }
-              else
-              {
-                isTurnOffLight = true;
-                displayMessage("Tat den...");
-                buttonTatDenSound();
-              }
-          } else if (IrReceiver.decodedIRData.command == 0x47) {
-              Serial.println("Speed");
-              if(isTurnOffDieuHoa)
-              {
-                isTurnOffDieuHoa = false;
-                displayMessage("Bat dieu hoa...");
-                buttonBatDieuHoaSound();
-              }
-              else
-              {
-                isTurnOffDieuHoa = true;
-                displayMessage("Tat dieu hoa...");
-                buttonTatDieuHoaSound();
-              }
-          }else if (IrReceiver.decodedIRData.command == 0x7) {
-              Serial.println("Timer");
-              if(addUserMode)
-              {
-                addUserMode = false;
-              }
-              else
-              {
-                addUserMode = true;
-              }
-              pressedButtonThemNguoi = false;
-              addUser();
-          }else if (IrReceiver.decodedIRData.command == 0x9) {
-              Serial.println("Swing");
-              if(isDoorClosed)
-              {
-                isDoorClosed = false;
-                displayMessage("Dang mo cua...");
-                buttonCuaMoSound();
-                openDoor();
-              }
-              else
-              {
-                isDoorClosed = true;
-                displayMessage("Dang dong cua...");
-                buttonCuaDongSound();
-                lockDoor();
-              }
-          }
+       if (IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT) {
+      }
+      else {
+        if (IrReceiver.decodedIRData.command == 0x45) {
+            Serial.println("On/Off");
+            if(isTurnOffLight)
+            {
+              isTurnOffLight = false;
+              displayMessage("Bat den...");
+              buttonBatDenSound();
+            }
+            else
+            {
+              isTurnOffLight = true;
+              displayMessage("Tat den...");
+              buttonTatDenSound();
+            }
+        } else if (IrReceiver.decodedIRData.command == 0x47) {
+            Serial.println("Speed");
+            if(isTurnOffDieuHoa)
+            {
+              isTurnOffDieuHoa = false;
+              displayMessage("Bat dieu hoa...");
+              buttonBatDieuHoaSound();
+            }
+            else
+            {
+              isTurnOffDieuHoa = true;
+              displayMessage("Tat dieu hoa...");
+              buttonTatDieuHoaSound();
+            }
+        }else if (IrReceiver.decodedIRData.command == 0x7) {
+            Serial.println("Timer");
+            if(addUserMode)
+            {
+              addUserMode = false;
+            }
+            else
+            {
+              addUserMode = true;
+            }
+            pressedButtonThemNguoi = false;
+            addUser();
+        }else if (IrReceiver.decodedIRData.command == 0x9) {
+            Serial.println("Swing");
+            if(isDoorClosed)
+            {
+              isDoorClosed = false;
+              displayMessage("Dang mo cua...");
+              buttonCuaMoSound();
+              openDoor();
+            }
+            else
+            {
+              isDoorClosed = true;
+              displayMessage("Dang dong cua...");
+              buttonCuaDongSound();
+              lockDoor();
+            }
         }
-    }
+      }
+  }
+  // int pin34 = analogRead(READ_IR_ANALOG_FROM_OTHER_ESP32);
+  // Serial.printf("pin34 %d\n", pin34);
+  // if (pin34 == 1) {
+  //   Serial.println("On/Off");
+  //   if (isTurnOffLight) {
+  //     isTurnOffLight = false;
+  //     displayMessage("Bat den...");
+  //     buttonBatDenSound();
+  //   } else {
+  //     isTurnOffLight = true;
+  //     displayMessage("Tat den...");
+  //     buttonTatDenSound();
+  //   }
+  // } else if (pin34 == 2) {
+  //   Serial.println("Speed");
+  //   if (isTurnOffDieuHoa) {
+  //     isTurnOffDieuHoa = false;
+  //     displayMessage("Bat dieu hoa...");
+  //     buttonBatDieuHoaSound();
+  //   } else {
+  //     isTurnOffDieuHoa = true;
+  //     displayMessage("Tat dieu hoa...");
+  //     buttonTatDieuHoaSound();
+  //   }
+  // } else if (pin34 == 3) {
+  //   Serial.println("Timer");
+  //   if (addUserMode) {
+  //     addUserMode = false;
+  //   } else {
+  //     addUserMode = true;
+  //   }
+  //   pressedButtonThemNguoi = false;
+  //   addUser();
+  // } else if (pin34 == 4) {
+  //   Serial.println("Swing");
+  //   if (isDoorClosed) {
+  //     isDoorClosed = false;
+  //     displayMessage("Dang mo cua...");
+  //     buttonCuaMoSound();
+  //     openDoor();
+  //   } else {
+  //     isDoorClosed = true;
+  //     displayMessage("Dang dong cua...");
+  //     buttonCuaDongSound();
+  //     lockDoor();
+  //   }
+  // }
 
+  dieuKhienDen();
+  dieuKhienDieuHoa();
   if (millis() - lastMessageTime >= displayDuration && lastMessageTime != 0) {
     displayMessage("He thong san sang\n\nNhiet do: " + String(nhietDoGuiDi) + "'C\n" + "Do am: " + String(doAmGuiDi) + "%");
-    lastClearTime = millis(); // Reset the timer
+    lastClearTime = millis();  // Reset the timer
   }
+
+  httpSync();
 }
 
 
@@ -436,39 +508,33 @@ int checkUser(String uid) {
     Serial.printf("Nguoi dung da luu UID: |%s|\n", savedUIDs[i]);
     if (savedUIDs[i] == uid) {
 
-      return i; // trả về index của người dùng
+      return i;  // trả về index của người dùng
     }
   }
-  return -1; // không tìm thấy người dùng
+  return -1;  // không tìm thấy người dùng
 }
 
 void handleSuccess(String uid, int userIndex) {
   displayMessage("Doc the thanh cong.");
   readDoneSound();
   delay(500);
-  
-  // Hiển thị thông tin người dùng
-  
 
-  if(hasPeopleMode)
-  {
-    if(isDoorClosed)
-    {
+  // Hiển thị thông tin người dùng
+
+
+  if (hasPeopleMode) {
+    if (isDoorClosed) {
       displayMessage("Xin chao " + usernames[userIndex] + ".\nXin moi vao.");
       openDoor();
       hasPeopleMode = true;
       isDoorClosed = false;
-    }
-    else
-    {
+    } else {
       displayMessage("Tam biet " + usernames[userIndex] + ".\nHen gap lai.");
       lockDoor();
       hasPeopleMode = false;
       isDoorClosed = false;
     }
-  }
-  else
-  {
+  } else {
     displayMessage("Xin chao " + usernames[userIndex] + ".\nXin moi vao.");
     openDoor();
     hasPeopleMode = true;
@@ -481,8 +547,7 @@ void handleFailure() {
   errorSound();
 }
 
-void openDoor()
-{
+void openDoor() {
   // Mở khóa cửa
   Serial.println("Mo khoa cua");
   smoothMove(ViTriDongCua, ViTriMoCua, 15);
@@ -501,10 +566,8 @@ void lockDoor() {
 }
 
 
-bool readButtonThemNguoi()
-{
-  if(digitalRead(BUTTON_ThemNg_PIN) == LOW)
-  {
+bool readButtonThemNguoi() {
+  if (digitalRead(BUTTON_ThemNg_PIN) == LOW) {
     Serial.println("Da bam huy them nguoi!");
     buttonHuyThemNgSound();
     pressedButtonThemNguoi = true;
@@ -515,19 +578,15 @@ bool readButtonThemNguoi()
 }
 
 void addUser() {
-  if(addUserMode)
-  {
+  if (addUserMode) {
     displayMessage("Che do them nguoi dung.");
-    while(!readButtonThemNguoi())
-    {
-      if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial())
-      {
+    while (!readButtonThemNguoi()) {
+      if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
         // if(!pressedButtonThemNguoi)
         {
           String newUID = getCardUID();
           int checkedUser = checkUser(newUID);
-          if(checkedUser == -1)
-          {
+          if (checkedUser == -1) {
             savedUIDs[savedUsers] = newUID;
             usernames[savedUsers] = "Nguoi dung " + String(char(savedUsers - 4 + 'A'));
             savedUsers++;
@@ -539,9 +598,7 @@ void addUser() {
             displayMessage("Thoat che do them nguoi dung.");
             addUserMode = false;
             break;
-          }
-          else
-          {
+          } else {
             errorSound();
             Serial.println("Trung the: " + usernames[checkedUser] + "\nXin moi thu lai!");
             displayMessage("Trung the: " + usernames[checkedUser] + "\nXin moi thu lai!");
@@ -549,100 +606,78 @@ void addUser() {
             // break;
           }
         }
-        
       }
     }
-    if(pressedButtonThemNguoi)
-    {
+    if (pressedButtonThemNguoi) {
       Serial.println("Huy che do them nguoi!");
       displayMessage("Huy che do them nguoi!");
       addUserMode = false;
     }
     mfrc522.PICC_HaltA();
-  } 
-
+  }
 }
 
 int prevLightState = 0;
-void dieuKhienDen()
-{
-  
-  if(hasPeopleMode && !isTurnOffLight)
-  {
+void dieuKhienDen() {
+
+  if (hasPeopleMode && !isTurnOffLight) {
     // Kiểm tra độ sáng
     int lightLevel = digitalRead(LDR_PIN);
     // Serial.printf("Cam bien anh sang: %d\n", lightLevel);
-    if (lightLevel == 1) { // trời tối
-      if(prevLightState != lightLevel)
-      {
+    if (lightLevel == 1) {  // trời tối
+      if (prevLightState != lightLevel) {
         prevLightState = lightLevel;
-        digitalWrite(LED_PIN, HIGH); // bật đèn
+        digitalWrite(LED_PIN, HIGH);  // bật đèn
         displayMessage("Den phong bat.");
       }
-    }
-    else
-    {
-      if(prevLightState != lightLevel)
-      {
+    } else {
+      if (prevLightState != lightLevel) {
         digitalWrite(LED_PIN, LOW);
         displayMessage("Den phong tat.");
       }
     }
-    
+
     prevLightState = lightLevel;
-  }
-  else
-  {
+  } else {
     prevLightState = 0;
     digitalWrite(LED_PIN, LOW);
   }
 }
 
 int prevDieuHoaState = 0;
-void dieuKhienDieuHoa()
-{
+void dieuKhienDieuHoa() {
   int currDieuHoaState = 0;
-  TempAndHumidity  data = dhtSensor.getTempAndHumidity();
+  TempAndHumidity data = dhtSensor.getTempAndHumidity();
   float nhietDo = data.temperature;
   float doAm = data.humidity;
   nhietDoGuiDi = nhietDo;
   doAmGuiDi = doAm;
-  if(hasPeopleMode && !isTurnOffDieuHoa)
-  {
+  if (hasPeopleMode && !isTurnOffDieuHoa) {
     // Serial.println("Nhiet do: " + String(nhietDo, 1) + "°C");
     // Serial.println("Do am: " + String(doAm, 1) + "%");
     // Serial.printf("Cam bien anh sang: %d\n", lightLevel);
-    if (nhietDo > 30 || doAm > 90)
-    {
+    if (nhietDo > 30 || doAm > 90) {
       currDieuHoaState = 1;
-    }
-    else
-    {
+    } else {
       currDieuHoaState = 0;
     }
-    if (currDieuHoaState == 1){ // trời nong
-      if(prevDieuHoaState != currDieuHoaState)
-      {
+    if (currDieuHoaState == 1) {  // trời nong
+      if (prevDieuHoaState != currDieuHoaState) {
         displayMessage("Nhiet do: " + String(nhietDo, 1) + "'C\n" + "Do am: " + String(doAm, 1) + "%");
         prevDieuHoaState = currDieuHoaState;
-        digitalWrite(DieuHoa_PIN, HIGH); // bật dieu hoa
+        digitalWrite(DieuHoa_PIN, HIGH);  // bật dieu hoa
         displayMessage("Dieu hoa bat.");
       }
-    }
-    else
-    {
-      if(prevDieuHoaState != currDieuHoaState)
-      {
+    } else {
+      if (prevDieuHoaState != currDieuHoaState) {
         displayMessage("Nhiet do: " + String(nhietDo, 1) + "'C\n" + "Do am: " + String(doAm, 1) + "%");
         digitalWrite(DieuHoa_PIN, LOW);
         displayMessage("Dieu hoa tat.");
       }
     }
-    
+
     prevDieuHoaState = currDieuHoaState;
-  }
-  else
-  {
+  } else {
     prevDieuHoaState = 0;
     digitalWrite(DieuHoa_PIN, LOW);
   }
@@ -658,125 +693,178 @@ void displayMessage(String message) {
 }
 
 
-void openSound()
-{
+void httpSync() {
+  unsigned long currentMillis = millis();
+
+  // Check if 1 second has passed since the last HTTP request
+  if (currentMillis - lastHttpRequestTime >= httpInterval) {
+    lastHttpRequestTime = currentMillis;  // Update the last request time
+
+    // Send HTTP request
+    // Serial.println("Sending HTTP request...");
+    HTTPClient http;
+    http.begin(server_name);
+    http.addHeader("Content-type", "text/plain");
+
+    String httpRequestData = "nhietdo=" + String(nhietDoGuiDi) + ", doAm=" + String(doAmGuiDi) + ", coNguoi=" + String(hasPeopleMode ? "true" : "false");
+    int httpResponseCode = http.POST(httpRequestData);
+
+    // if (httpResponseCode > 0) {
+    //   Serial.print("Good HTTP response code: ");
+    // } else {
+    //   Serial.print("Bad HTTP response code: ");
+    // }
+    // Serial.println(httpResponseCode);
+
+    String response = http.getString();
+    // Serial.print("Response: ");
+    // Serial.println(response);
+    updateToPin(response);
+    http.end();  // Close connection
+  }
+}
+
+void updateToPin(String s) {
+  s.replace(",", " ");
+  s.replace("=", " ");
+  int index = 0;  // Variable to track parsing position
+  while (index < s.length()) {
+    // Extract the next token
+    int nextSpace = s.indexOf(' ', index);
+    if (nextSpace == -1) nextSpace = s.length();
+    String token = s.substring(index, nextSpace);
+    index = nextSpace + 1;
+
+    // Check the token and assign the corresponding value
+    if (token == "den") {
+      pin_control_den = s.substring(index, s.indexOf(' ', index)).toInt();
+    } else if (token == "dieuhoa") {
+      pin_control_dieuhoa = s.substring(index, s.indexOf(' ', index)).toInt();
+    }
+  }
+  setPinDenAutoFromWeb();
+  setPinDieuHoaAutoFromWeb();
+}
+
+
+void openSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes openSong[] = {{"1*", 1}, {"3*", 1}, {"5*", 1}, {"1**", 1}};
-  int lenOpenSong = sizeof(openSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes openSong[] = { { "1*", 1 }, { "3*", 1 }, { "5*", 1 }, { "1**", 1 } };
+  int lenOpenSong = sizeof(openSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(openSong, lenOpenSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
 
-void closeSound()
-{
+void closeSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes closeSong[] = {{"1**", 1}, {"5*", 1}, {"3*", 1}, {"1*", 1}};
-  int lenCloseSong = sizeof(closeSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes closeSong[] = { { "1**", 1 }, { "5*", 1 }, { "3*", 1 }, { "1*", 1 } };
+  int lenCloseSong = sizeof(closeSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(closeSong, lenCloseSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
 
-void errorSound()
-{
+void errorSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes errorSong[] = {{"1*", 0.5}, {"3*", 0.5}, {"1*", 1}};
-  int lenErrorSong = sizeof(errorSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes errorSong[] = { { "1*", 0.5 }, { "3*", 0.5 }, { "1*", 1 } };
+  int lenErrorSong = sizeof(errorSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(errorSong, lenErrorSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
 
-void readDoneSound()
-{
+void readDoneSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes readDoneSong[] = {{"1*", 0.5}, {"2*", 0.5}, {"5*", 0.5}, {"1*", 2}};
-  int lenReadDoneSong = sizeof(readDoneSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes readDoneSong[] = { { "1*", 0.5 }, { "2*", 0.5 }, { "5*", 0.5 }, { "1*", 2 } };
+  int lenReadDoneSong = sizeof(readDoneSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(readDoneSong, lenReadDoneSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
-void buttonCuaMoSound()
-{
+void buttonCuaMoSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes buttonCuaMoSong[] = {{"1*", 0.5}, {"2*", 0.5}, {"3*", 1}};
-  int lenbuttonCuaMoSong = sizeof(buttonCuaMoSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes buttonCuaMoSong[] = { { "1*", 0.5 }, { "2*", 0.5 }, { "3*", 1 } };
+  int lenbuttonCuaMoSong = sizeof(buttonCuaMoSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(buttonCuaMoSong, lenbuttonCuaMoSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
-void buttonCuaDongSound()
-{
+void buttonCuaDongSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes buttonCuaDongSong[] = {{"3*", 0.5}, {"2*", 0.5}, {"1*", 1}};
-  int lenbuttonCuaDongSong = sizeof(buttonCuaDongSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes buttonCuaDongSong[] = { { "3*", 0.5 }, { "2*", 0.5 }, { "1*", 1 } };
+  int lenbuttonCuaDongSong = sizeof(buttonCuaDongSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(buttonCuaDongSong, lenbuttonCuaDongSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
-void buttonThemNgSound()
-{
+void buttonThemNgSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes buttonThemNguoiSong[] = {{"3*", 0.5}, {"5*", 1}};
-  int lenbuttonThemNguoiSong = sizeof(buttonThemNguoiSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes buttonThemNguoiSong[] = { { "3*", 0.5 }, { "5*", 1 } };
+  int lenbuttonThemNguoiSong = sizeof(buttonThemNguoiSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(buttonThemNguoiSong, lenbuttonThemNguoiSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
-void buttonHuyThemNgSound()
-{
+void buttonHuyThemNgSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes buttonHuyThemSong[] = {{"5*", 0.5}, {"1*", 1}};
-  int lenbuttonHuyThemSong = sizeof(buttonHuyThemSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes buttonHuyThemSong[] = { { "5*", 0.5 }, { "1*", 1 } };
+  int lenbuttonHuyThemSong = sizeof(buttonHuyThemSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(buttonHuyThemSong, lenbuttonHuyThemSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
 
-void buttonBatDenSound()
-{
+void buttonBatDenSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes buttonBatDenSong[] = {{"1*", 0.5}, {"5*", 1}};
-  int lenbuttonBatDenSong = sizeof(buttonBatDenSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes buttonBatDenSong[] = { { "1*", 0.5 }, { "5*", 1 } };
+  int lenbuttonBatDenSong = sizeof(buttonBatDenSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(buttonBatDenSong, lenbuttonBatDenSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
 
-void buttonTatDenSound()
-{
+void buttonTatDenSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes buttonTatDenSong[] = {{"5*", 0.5}, {"1*", 1}};
-  int lenbuttonTatDenSong = sizeof(buttonTatDenSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes buttonTatDenSong[] = { { "5*", 0.5 }, { "1*", 1 } };
+  int lenbuttonTatDenSong = sizeof(buttonTatDenSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(buttonTatDenSong, lenbuttonTatDenSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
 
-void buttonBatDieuHoaSound()
-{
+void buttonBatDieuHoaSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes buttonBatDieuHoaSong[] = {{"1*", 0.5}, {"3*", 1}};
-  int lenbuttonBatDieuHoaSong = sizeof(buttonBatDieuHoaSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes buttonBatDieuHoaSong[] = { { "1*", 0.5 }, { "3*", 1 } };
+  int lenbuttonBatDieuHoaSong = sizeof(buttonBatDieuHoaSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(buttonBatDieuHoaSong, lenbuttonBatDieuHoaSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
 
-void buttonTatDieuHoaSound()
-{
+void buttonTatDieuHoaSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes buttonTatDieuHoaSong[] = {{"3*", 0.5}, {"1*", 1}};
-  int lenbuttonTatDieuHoaSong = sizeof(buttonTatDieuHoaSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes buttonTatDieuHoaSong[] = { { "3*", 0.5 }, { "1*", 1 } };
+  int lenbuttonTatDieuHoaSong = sizeof(buttonTatDieuHoaSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(buttonTatDieuHoaSong, lenbuttonTatDieuHoaSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
 
-void thanhCongSound()
-{
+void thanhCongSound() {
   //myServo.attach(SERVO_PIN);
-  struct PlayNote::notes thanhCongSong[] = {{"1*", 1}, {"2*", 1}, {"5*", 2}};
-  int lenthanhCongSong = sizeof(thanhCongSong)/sizeof(struct PlayNote::notes);
+  struct PlayNote::notes thanhCongSong[] = { { "1*", 1 }, { "2*", 1 }, { "5*", 2 } };
+  int lenthanhCongSong = sizeof(thanhCongSong) / sizeof(struct PlayNote::notes);
   playNote.playSong(thanhCongSong, lenthanhCongSong);
   //myServo.attach(SERVO_PIN);
+  // IrReceiver.restartTimer();
 }
 
 void smoothMove(int startPos, int endPos, int delayTime) {
   Serial.printf("currentPosServo: %d, start: %d, end: %d\n", currentPosServo, startPos, endPos);
-  String mes1 = "currentPosServo: " + String(currentPosServo) + ", start: " + String(startPos) + ", end: "+ String(endPos) + "\n";
+  String mes1 = "currentPosServo: " + String(currentPosServo) + ", start: " + String(startPos) + ", end: " + String(endPos) + "\n";
   // displayMessage(mes1);
-  if(currentPosServo == startPos)
-  { 
+  if (currentPosServo == startPos) {
     // displayMessage(mes1);
     myServo.attach(SERVO_PIN);
     if (startPos < endPos) {
@@ -796,7 +884,9 @@ void smoothMove(int startPos, int endPos, int delayTime) {
     pinMode(SERVO_PIN, INPUT);
     currentPosServo = endPos;
   }
+  // IrReceiver.restartTimer();
 }
+
 
 /*
 Hãy viết một đoạn code Arduino có sử dụng các linh kiện sau:
@@ -820,5 +910,3 @@ Nếu sai UID thì buzzer kêu 2 tiếng bíp và Màn hình hiện thông báo 
 
 Nút B khi ấn sẽ đưa hệ thống vào chế độ thêm người dùng mới (Lưu UID thẻ vào hệ thống với tên người dùng đặt theo dạng "Nguoi dung A", "Nguoi dung B",...)
 */
-
-
